@@ -1,0 +1,1 @@
+require(game:GetService("ReplicatedStorage").Shared.example1)
