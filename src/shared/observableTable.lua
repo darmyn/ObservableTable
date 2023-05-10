@@ -70,6 +70,59 @@ local function deserializeLookup(serializedLookup)
 	return traverseTable(serializedLookup)
 end
 
+local function applyMetatable(self: observableTable, copy, original)
+	local mt = {
+		__index = original,
+		__newindex = function(t, k, v)
+			local updateDetails = {
+				key = k,
+				value = v,
+				tableId = copy._id
+			}
+			original[k] = v
+			self._events.valueChanged:Fire(updateDetails)
+			for i, batchedUpdate: updateDetails in ipairs(self._replicationBatch) do
+				if batchedUpdate.key == batchedUpdate.key and batchedUpdate.tableId == updateDetails.value then
+					self._replicationBatch[i] = updateDetails
+					return
+				end
+			end
+			table.insert(self._replicationBatch, updateDetails)
+		end
+	}
+	setmetatable(copy, mt)
+end
+
+local function createCopy(self: observableTable, original)
+	local copy = {}
+	for key, value in pairs(original) do
+		if type(value) == "table" then
+			copy[key] = createCopy(self, value) 
+		end
+	end
+
+	copy._id = self._nextId
+	self._tableLookup[self._nextId] = original
+	self._nextId += 1
+
+	applyMetatable(self, copy, original)
+
+	return copy
+end
+
+local function rebuildData(self: observableTable, _data)
+	local lookup = self._tableLookup
+	local data = _data or self.data
+	local rawData = lookup[data._id]
+	applyMetatable(self, data, rawData)
+	for k, proxy in pairs(data) do
+		if typeof(proxy) == "table" then
+			rebuildData(self, proxy)
+		end
+	end
+	return rawData
+end
+
 if isServer then
 	getInitialTableRF = Instance.new("RemoteFunction")
 	getInitialTableRF.Name = "getInitialTable"
@@ -125,46 +178,6 @@ type id = Instance & string & number
 type tableId = number
 type auth = (tableId, any, any) -> boolean
 
-local function applyMetatable(self: observableTable, copy, original)
-	local mt = {
-		__index = original,
-		__newindex = function(t, k, v)
-			local updateDetails = {
-				key = k,
-				value = v,
-				tableId = copy._id
-			}
-			original[k] = v
-			self._events.valueChanged:Fire(updateDetails)
-			for i, batchedUpdate: updateDetails in ipairs(self._replicationBatch) do
-				if batchedUpdate.key == batchedUpdate.key and batchedUpdate.tableId == updateDetails.value then
-					self._replicationBatch[i] = updateDetails
-					return
-				end
-			end
-			table.insert(self._replicationBatch, updateDetails)
-		end
-	}
-	setmetatable(copy, mt)
-end
-
-local function createCopy(self: observableTable, original)
-	local copy = {}
-	for key, value in pairs(original) do
-		if type(value) == "table" then
-			copy[key] = createCopy(self, value) 
-		end
-	end
-
-	copy._id = self._nextId
-	self._tableLookup[self._nextId] = original
-	self._nextId += 1
-
-	applyMetatable(self, copy, original)
-
-	return copy
-end
-
 function observableTable.interface.new(id: id, rawData, auth: auth)
 	assert(isServer, "must be called from server")
 	local self = setmetatable({}, observableTable.meta)
@@ -186,19 +199,6 @@ function observableTable.interface.new(id: id, rawData, auth: auth)
 	self.data = createCopy(self, rawData)
 	observableTable.interface.active[self.id] = self
 	return self
-end
-
-local function rebuildData(self: observableTable, _data)
-	local lookup = self._tableLookup
-	local data = _data or self.data
-	local rawData = lookup[data._id]
-	applyMetatable(self, data, rawData)
-	for k, proxy in pairs(data) do
-		if typeof(proxy) == "table" then
-			rebuildData(self, proxy)
-		end
-	end
-	return rawData
 end
 
 function observableTable.interface.connect(id: id)
